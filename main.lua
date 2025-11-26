@@ -10,12 +10,16 @@ local UIManager = require("ui/uimanager")
 local WidgetContainer = require("ui/widget/container/widgetcontainer")
 local Menu = require("ui/widget/menu")
 local Screen = require("device").screen
+local DataStorage = require("datastorage")
 local util = require("util")
 local _ = require("gettext")
 local json = require("json")
 local http = require("socket.http")
 local ltn12 = require("ltn12")
 local logger = require("logger")
+local SQ3 = require("lua-ljsqlite3/init")
+
+local BASE_API_URL = "https://v5jdc5vc-3000.brs.devtunnels.ms/api/koreader"
 
 local Readit = WidgetContainer:extend {
   name = "readit",
@@ -32,7 +36,7 @@ local function postJSON(bodyTable)
   local response = {}
 
   local ok, status = http.request {
-    url = "https://v5jdc5vc-3000.brs.devtunnels.ms/api/koreader/hash",
+    url = BASE_API_URL .. "/hash",
     method = "POST",
     headers = {
       ["Content-Type"] = "application/json",
@@ -49,7 +53,7 @@ local function getBookList()
   local response = {}
 
   local ok, status = http.request {
-    url = "https://v5jdc5vc-3000.brs.devtunnels.ms/api/koreader/books",
+    url = BASE_API_URL .. "/books",
     method = "GET",
     sink = ltn12.sink.table(response)
   }
@@ -69,9 +73,160 @@ local function getBookList()
   end
 end
 
+local function getLastSyncTimestamp(book_hash)
+  local response = {}
+
+  local ok, status = http.request {
+    url = BASE_API_URL .. "/sync/last/" .. book_hash,
+    method = "GET",
+    sink = ltn12.sink.table(response)
+  }
+
+  if ok and status == 200 then
+    local responseBody = table.concat(response)
+    local success, data = pcall(json.decode, responseBody)
+    if success and data.last_open then
+      return tonumber(data.last_open)
+    end
+  end
+
+  return 0 -- Si no hay sync previo, retornar 0 para traer todas las sesiones
+end
+
+local function getBookStatistics(book_hash, last_sync_ts)
+  local stats_db_path = DataStorage:getSettingsDir() .. "/statistics.sqlite3"
+  local conn = SQ3.open(stats_db_path)
+
+  if not conn then
+    logger.err("No se pudo abrir statistics.sqlite3")
+    return nil
+  end
+
+  local book_data = {}
+  local reading_sessions = {}
+
+  -- Obtener datos del libro
+  local book_query = [[
+    SELECT id, title, authors, pages, total_read_time, total_read_pages, last_open
+    FROM book
+    WHERE md5 = ?
+  ]]
+
+  local stmt = conn:prepare(book_query)
+  if stmt then
+    local result = stmt:reset():bind(book_hash):step()
+    if result then
+      local book_id = result[1]
+      book_data.title = result[2] or ""
+      book_data.authors = result[3] or ""
+      book_data.pages = tonumber(result[4]) or 0
+      book_data.totalReadTime = tonumber(result[5]) or 0
+      book_data.totalReadPages = tonumber(result[6]) or 0
+      local last_open_timestamp = tonumber(result[7])
+      book_data.lastOpen = last_open_timestamp and os.date("!%Y-%m-%dT%H:%M:%SZ", last_open_timestamp) or nil
+
+      -- Obtener solo sesiones nuevas (posteriores a last_sync_ts)
+      local sessions_query = [[
+        SELECT page, start_time, duration, total_pages
+        FROM page_stat_data
+        WHERE id_book = ? AND start_time > ?
+        ORDER BY start_time ASC
+      ]]
+
+      local sessions_stmt = conn:prepare(sessions_query)
+      if sessions_stmt then
+        sessions_stmt:reset():bind(book_id, last_sync_ts)
+        for row in sessions_stmt:rows() do
+          table.insert(reading_sessions, {
+            page = tonumber(row[1]),
+            startTime = os.date("!%Y-%m-%dT%H:%M:%SZ", tonumber(row[2])),
+            duration = tonumber(row[3]),
+            totalPages = tonumber(row[4])
+          })
+        end
+      end
+    end
+  end
+
+  conn:close()
+
+  if book_data.title then
+    book_data.readingSessions = reading_sessions
+    return book_data
+  end
+
+  return nil
+end
+
+local function syncBookStatistics(book_hash)
+  -- Primero obtener el último timestamp sincronizado
+  local last_sync_ts = getLastSyncTimestamp(book_hash)
+
+  -- Obtener estadísticas con solo las sesiones nuevas
+  local stats = getBookStatistics(book_hash, last_sync_ts)
+
+  if not stats then
+    logger.warn("No se encontraron estadísticas para el libro")
+    return false
+  end
+
+  -- Si no hay sesiones nuevas, no enviar nada (pero actualizar totales)
+  if #stats.readingSessions == 0 and last_sync_ts > 0 then
+    logger.info("No hay sesiones nuevas para sincronizar")
+    return true
+  end
+
+  local body = json.encode({
+    hash = book_hash,
+    title = stats.title,
+    authors = stats.authors,
+    pages = stats.pages,
+    totalReadTime = stats.totalReadTime,
+    totalReadPages = stats.totalReadPages,
+    lastOpen = stats.lastOpen,
+    readingSessions = stats.readingSessions
+  })
+
+  local response = {}
+  local ok, status = http.request {
+    url = BASE_API_URL .. "/sync",
+    method = "POST",
+    headers = {
+      ["Content-Type"] = "application/json",
+      ["Content-Length"] = #body,
+    },
+    source = ltn12.source.string(body),
+    sink = ltn12.sink.table(response)
+  }
+
+  if ok and status == 200 then
+    logger.info("Estadísticas sincronizadas exitosamente:", #stats.readingSessions, "sesiones nuevas")
+    return true
+  else
+    logger.err("Error al sincronizar estadísticas:", status)
+    return false
+  end
+end
+
 function Readit:init()
   self:onDispatcherRegisterActions()
   self.ui.menu:registerToMainMenu(self)
+end
+
+function Readit:onSaveSettings()
+  -- Se ejecuta periódicamente y antes de suspensión/cierre
+  if self.ui and self.ui.document and self.ui.document.file then
+    local document_hash = util.partialMD5(self.ui.document.file)
+    syncBookStatistics(document_hash)
+  end
+end
+
+function Readit:onCloseDocument()
+  -- Se ejecuta al cerrar el libro explícitamente
+  if self.ui and self.ui.document and self.ui.document.file then
+    local document_hash = util.partialMD5(self.ui.document.file)
+    syncBookStatistics(document_hash)
+  end
 end
 
 function Readit:showBookList()
@@ -118,16 +273,46 @@ end
 
 function Readit:addToMainMenu(menu_items)
   menu_items.readit = {
-    text = _("Read It: Seleccionar libro"),
-    -- in which menu this should be appended
+    text = _("Read It"),
+    sub_item_table = {
+      {
+        text = _("Seleccionar libro"),
+        callback = function()
+          UIManager:show(InfoMessage:new {
+            text = _("Cargando libros..."),
+          })
+          self:showBookList()
+        end,
+      },
+      {
+        text = _("Sincronizar estadísticas ahora"),
+        callback = function()
+          if self.ui and self.ui.document and self.ui.document.file then
+            UIManager:show(InfoMessage:new {
+              text = _("Sincronizando..."),
+            })
+
+            local document_hash = util.partialMD5(self.ui.document.file)
+            local success = syncBookStatistics(document_hash)
+
+            if success then
+              UIManager:show(InfoMessage:new {
+                text = _("Sincronización exitosa"),
+              })
+            else
+              UIManager:show(InfoMessage:new {
+                text = _("Error en la sincronización"),
+              })
+            end
+          else
+            UIManager:show(InfoMessage:new {
+              text = _("No hay libro abierto"),
+            })
+          end
+        end,
+      },
+    },
     sorting_hint = "more_tools",
-    -- a callback when tapping
-    callback = function()
-      UIManager:show(InfoMessage:new {
-        text = _("Cargando libros..."),
-      })
-      self:showBookList()
-    end,
   }
 end
 
