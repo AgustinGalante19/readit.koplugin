@@ -1,6 +1,4 @@
 --[[--
-This is a debug plugin to test Plugin functionality.
-
 @module koplugin.HelloWorld
 --]]
 
@@ -19,7 +17,18 @@ local ltn12 = require("ltn12")
 local logger = require("logger")
 local SQ3 = require("lua-ljsqlite3/init")
 
-local BASE_API_URL = "https://v5jdc5vc-3000.brs.devtunnels.ms/api/koreader"
+local debugMode = false
+
+
+
+local BASE_API_URL = ""
+
+if not debugMode then
+  BASE_API_URL = "https://read-it-blush.vercel.app/api/koreader"
+else
+  BASE_API_URL = "https://v5jdc5vc-3000.brs.devtunnels.ms/api/koreader"
+end
+
 
 local Readit = WidgetContainer:extend {
   name = "readit",
