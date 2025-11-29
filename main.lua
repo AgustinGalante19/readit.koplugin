@@ -94,12 +94,18 @@ local function getLastSyncTimestamp(book_hash)
   if ok and status == 200 then
     local responseBody = table.concat(response)
     local success, data = pcall(json.decode, responseBody)
-    if success and data.last_open then
-      return tonumber(data.last_open)
+    if success and data then
+      -- Si last_open es null o no existe, retornar 0 (primera sincronización)
+      if data.last_open then
+        return tonumber(data.last_open)
+      else
+        return 0
+      end
     end
   end
 
-  return 0 -- Si no hay sync previo, retornar 0 para traer todas las sesiones
+  -- Si hay error de conexión o la API no responde, retornar 0 por defecto
+  return 0
 end
 
 local function getBookStatistics(book_hash, last_sync_ts)
@@ -170,6 +176,10 @@ end
 local function syncBookStatistics(book_hash)
   -- Primero obtener el último timestamp sincronizado
   local last_sync_ts = getLastSyncTimestamp(book_hash)
+
+  if not last_sync_ts then
+    last_sync_ts = 0 -- Si falla la consulta, usar 0 por defecto
+  end
 
   -- Obtener estadísticas con solo las sesiones nuevas
   local stats = getBookStatistics(book_hash, last_sync_ts)
