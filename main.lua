@@ -19,8 +19,6 @@ local SQ3 = require("lua-ljsqlite3/init")
 
 local debugMode = false
 
-
-
 local BASE_API_URL = ""
 
 if not debugMode then
@@ -273,6 +271,7 @@ function Readit:showBookList()
         postJSON({
           googleId = book.googleId,
           hash = document_hash,
+          pageCount = self.ui.document:getPageCount() or 0
         })
       end,
     })
@@ -283,16 +282,20 @@ function Readit:showBookList()
     item_table = items,
     is_borderless = true,
     is_popout = false,
-    width = Screen:getWidth() - 100,
-    height = Screen:getHeight() - 100,
+    width = Screen:getWidth(),
+    height = Screen:getHeight(),
   }
 
   UIManager:show(self.book_menu)
 end
 
 function Readit:addToMainMenu(menu_items)
+  local title = "Read It"
+  if debugMode then
+    title = title .. " (Debug)"
+  end
   menu_items.readit = {
-    text = _("Read It"),
+    text = _(title),
     sub_item_table = {
       {
         text = _("Seleccionar libro"),
