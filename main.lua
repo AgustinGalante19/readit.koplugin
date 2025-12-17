@@ -7,8 +7,10 @@ local InfoMessage = require("ui/widget/infomessage")
 local UIManager = require("ui/uimanager")
 local WidgetContainer = require("ui/widget/container/widgetcontainer")
 local Menu = require("ui/widget/menu")
+local InputDialog = require("ui/widget/inputdialog")
 local Screen = require("device").screen
 local DataStorage = require("datastorage")
+local LuaSettings = require("luasettings")
 local util = require("util")
 local _ = require("gettext")
 local json = require("json")
@@ -16,8 +18,10 @@ local http = require("socket.http")
 local ltn12 = require("ltn12")
 local logger = require("logger")
 local SQ3 = require("lua-ljsqlite3/init")
+local random = require("random")
+local random = require("random")
 
-local debugMode = false
+local debugMode = true
 
 local BASE_API_URL = ""
 
@@ -31,6 +35,7 @@ end
 local Readit = WidgetContainer:extend {
   name = "readit",
   is_doc_only = false,
+  settings_file = DataStorage:getSettingsDir() .. "/readit.lua",
 }
 
 function Readit:onDispatcherRegisterActions()
@@ -38,7 +43,65 @@ function Readit:onDispatcherRegisterActions()
     { category = "none", event = "ReadIt", title = _("Read It"), general = true, })
 end
 
-local function postJSON(bodyTable)
+function Readit:getUserIdentifier()
+  -- Si hay código de usuario configurado, usarlo
+  if self.user_code and self.user_code ~= "" then
+    return self.user_code
+  end
+
+  -- Caso contrario, usar device_id como fallback
+  if G_reader_settings:hasNot("device_id") then
+    G_reader_settings:saveSetting("device_id", random.uuid())
+  end
+  return G_reader_settings:readSetting("device_id")
+end
+
+function Readit:showUserCodeDialog()
+  local input_dialog
+  input_dialog = InputDialog:new {
+    title = _("Configurar código de usuario"),
+    input = self.user_code,
+    input_hint = _("Ingresa el código generado desde la app"),
+    buttons = {
+      {
+        {
+          text = _("Cancelar"),
+          callback = function()
+            UIManager:close(input_dialog)
+          end,
+        },
+        {
+          text = _("Guardar"),
+          is_enter_default = true,
+          callback = function()
+            local code = input_dialog:getInputText()
+            if code and code ~= "" then
+              self.user_code = code
+              self.settings:saveSetting("user_code", code)
+              self.settings:flush()
+
+              UIManager:close(input_dialog)
+              UIManager:show(InfoMessage:new {
+                text = _("Código guardado exitosamente"),
+              })
+            else
+              UIManager:show(InfoMessage:new {
+                text = _("El código no puede estar vacío"),
+              })
+            end
+          end,
+        },
+      },
+    },
+  }
+  UIManager:show(input_dialog)
+  input_dialog:onShowKeyboard()
+end
+
+local function postJSON(bodyTable, deviceCode)
+  -- Agregar deviceCode al body
+  bodyTable.deviceCode = deviceCode
+
   local body = json.encode(bodyTable)
   local response = {}
 
@@ -56,11 +119,11 @@ local function postJSON(bodyTable)
   return ok, status, table.concat(response)
 end
 
-local function getBookList()
+local function getBookList(deviceCode)
   local response = {}
 
   local ok, status = http.request {
-    url = BASE_API_URL .. "/books",
+    url = BASE_API_URL .. "/books/" .. deviceCode,
     method = "GET",
     sink = ltn12.sink.table(response)
   }
@@ -80,11 +143,11 @@ local function getBookList()
   end
 end
 
-local function getLastSyncTimestamp(book_hash)
+local function getLastSyncTimestamp(book_hash, deviceCode)
   local response = {}
 
   local ok, status = http.request {
-    url = BASE_API_URL .. "/sync/last/" .. book_hash,
+    url = BASE_API_URL .. "/sync/last/" .. book_hash .. "/" .. deviceCode,
     method = "GET",
     sink = ltn12.sink.table(response)
   }
@@ -171,9 +234,9 @@ local function getBookStatistics(book_hash, last_sync_ts)
   return nil
 end
 
-local function syncBookStatistics(book_hash)
+local function syncBookStatistics(book_hash, deviceCode)
   -- Primero obtener el último timestamp sincronizado
-  local last_sync_ts = getLastSyncTimestamp(book_hash)
+  local last_sync_ts = getLastSyncTimestamp(book_hash, deviceCode)
 
   if not last_sync_ts then
     last_sync_ts = 0 -- Si falla la consulta, usar 0 por defecto
@@ -195,6 +258,7 @@ local function syncBookStatistics(book_hash)
 
   local body = json.encode({
     hash = book_hash,
+    deviceCode = deviceCode,
     title = stats.title,
     authors = stats.authors,
     pages = stats.pages,
@@ -228,13 +292,18 @@ end
 function Readit:init()
   self:onDispatcherRegisterActions()
   self.ui.menu:registerToMainMenu(self)
+
+  -- Inicializar settings persistentes
+  self.settings = LuaSettings:open(self.settings_file)
+  self.user_code = self.settings:readSetting("user_code", "")
 end
 
 function Readit:onSaveSettings()
   -- Se ejecuta periódicamente y antes de suspensión/cierre
   if self.ui and self.ui.document and self.ui.document.file then
     local document_hash = util.partialMD5(self.ui.document.file)
-    syncBookStatistics(document_hash)
+    local deviceCode = self:getUserIdentifier()
+    syncBookStatistics(document_hash, deviceCode)
   end
 end
 
@@ -242,12 +311,14 @@ function Readit:onCloseDocument()
   -- Se ejecuta al cerrar el libro explícitamente
   if self.ui and self.ui.document and self.ui.document.file then
     local document_hash = util.partialMD5(self.ui.document.file)
-    syncBookStatistics(document_hash)
+    local deviceCode = self:getUserIdentifier()
+    syncBookStatistics(document_hash, deviceCode)
   end
 end
 
 function Readit:showBookList()
-  local books = getBookList()
+  local deviceCode = self:getUserIdentifier()
+  local books = getBookList(deviceCode)
 
   if not books or #books == 0 then
     UIManager:show(InfoMessage:new {
@@ -268,11 +339,12 @@ function Readit:showBookList()
 
         local document_path = self.ui.document.file
         local document_hash = util.partialMD5(document_path)
+        local deviceCode = self:getUserIdentifier()
         postJSON({
           googleId = book.googleId,
           hash = document_hash,
           pageCount = self.ui.document:getPageCount() or 0
-        })
+        }, deviceCode)
       end,
     })
   end
@@ -294,9 +366,22 @@ function Readit:addToMainMenu(menu_items)
   if debugMode then
     title = title .. " (Debug)"
   end
+
+  -- Obtener el identificador para mostrarlo en el menú
+  local deviceCode = self:getUserIdentifier()
   menu_items.readit = {
     text = _(title),
     sub_item_table = {
+      {
+        text = " ID: " .. deviceCode,
+        enabled_func = function() return false end, -- Deshabilitado, solo informativo
+      },
+      {
+        text = _("Configurar código de usuario"),
+        callback = function()
+          self:showUserCodeDialog()
+        end,
+      },
       {
         text = _("Seleccionar libro"),
         callback = function()
@@ -315,7 +400,8 @@ function Readit:addToMainMenu(menu_items)
             })
 
             local document_hash = util.partialMD5(self.ui.document.file)
-            local success = syncBookStatistics(document_hash)
+            local deviceCode = self:getUserIdentifier()
+            local success = syncBookStatistics(document_hash, deviceCode)
 
             if success then
               UIManager:show(InfoMessage:new {
