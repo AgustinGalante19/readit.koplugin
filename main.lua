@@ -19,9 +19,8 @@ local ltn12 = require("ltn12")
 local logger = require("logger")
 local SQ3 = require("lua-ljsqlite3/init")
 local random = require("random")
-local random = require("random")
 
-local debugMode = true
+local debugMode = false
 
 local BASE_API_URL = ""
 
