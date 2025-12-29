@@ -58,19 +58,19 @@ end
 function Readit:showUserCodeDialog()
   local input_dialog
   input_dialog = InputDialog:new {
-    title = _("Configurar código de usuario"),
+    title = _("Configure User Code"),
     input = self.user_code,
-    input_hint = _("Ingresa el código generado desde la app"),
+    input_hint = _("Enter the code generated from the app"),
     buttons = {
       {
         {
-          text = _("Cancelar"),
+          text = _("Cancel"),
           callback = function()
             UIManager:close(input_dialog)
           end,
         },
         {
-          text = _("Guardar"),
+          text = _("Save"),
           is_enter_default = true,
           callback = function()
             local code = input_dialog:getInputText()
@@ -81,11 +81,11 @@ function Readit:showUserCodeDialog()
 
               UIManager:close(input_dialog)
               UIManager:show(InfoMessage:new {
-                text = _("Código guardado exitosamente"),
+                text = _("Code saved successfully"),
               })
             else
               UIManager:show(InfoMessage:new {
-                text = _("El código no puede estar vacío"),
+                text = _("Code cannot be empty"),
               })
             end
           end,
@@ -173,7 +173,7 @@ local function getBookStatistics(book_hash, last_sync_ts)
   local conn = SQ3.open(stats_db_path)
 
   if not conn then
-    logger.err("No se pudo abrir statistics.sqlite3")
+    logger.err("Could not open statistics.sqlite3")
     return nil
   end
 
@@ -245,13 +245,13 @@ local function syncBookStatistics(book_hash, deviceCode)
   local stats = getBookStatistics(book_hash, last_sync_ts)
 
   if not stats then
-    logger.warn("No se encontraron estadísticas para el libro")
+    logger.warn("No statistics found for the book")
     return false
   end
 
   -- Si no hay sesiones nuevas, no enviar nada (pero actualizar totales)
   if #stats.readingSessions == 0 and last_sync_ts > 0 then
-    logger.info("No hay sesiones nuevas para sincronizar")
+    logger.info("No new sessions to synchronize")
     return true
   end
 
@@ -280,10 +280,10 @@ local function syncBookStatistics(book_hash, deviceCode)
   }
 
   if ok and status == 200 then
-    logger.info("Estadísticas sincronizadas exitosamente:", #stats.readingSessions, "sesiones nuevas")
+    logger.info("Statistics synchronized successfully:", #stats.readingSessions, "new sessions")
     return true
   else
-    logger.err("Error al sincronizar estadísticas:", status)
+    logger.err("Error synchronizing statistics:", status)
     return false
   end
 end
@@ -321,7 +321,7 @@ function Readit:showBookList()
 
   if not books or #books == 0 then
     UIManager:show(InfoMessage:new {
-      text = _("No se pudieron cargar los libros o la lista está vacía"),
+      text = _("Could not load books or the list is empty"),
     })
     return
   end
@@ -332,7 +332,7 @@ function Readit:showBookList()
       text = book.bookInfo,
       callback = function()
         UIManager:show(InfoMessage:new {
-          text = "Mandando datos...",
+          text = "Sending data...",
         })
         UIManager:close(self.book_menu)
 
@@ -349,7 +349,7 @@ function Readit:showBookList()
   end
 
   self.book_menu = Menu:new {
-    title = _("Selecciona un libro"),
+    title = _("Select a Book"),
     item_table = items,
     is_borderless = true,
     is_popout = false,
@@ -376,26 +376,26 @@ function Readit:addToMainMenu(menu_items)
         enabled_func = function() return false end, -- Deshabilitado, solo informativo
       },
       {
-        text = _("Configurar código de usuario"),
+        text = _("Configure User Code"),
         callback = function()
           self:showUserCodeDialog()
         end,
       },
       {
-        text = _("Seleccionar libro"),
+        text = _("Select Book"),
         callback = function()
           UIManager:show(InfoMessage:new {
-            text = _("Cargando libros..."),
+            text = _("Loading books..."),
           })
           self:showBookList()
         end,
       },
       {
-        text = _("Sincronizar estadísticas ahora"),
+        text = _("Synchronize Statistics Now"),
         callback = function()
           if self.ui and self.ui.document and self.ui.document.file then
             UIManager:show(InfoMessage:new {
-              text = _("Sincronizando..."),
+              text = _("Synchronizing..."),
             })
 
             local document_hash = util.partialMD5(self.ui.document.file)
@@ -404,16 +404,16 @@ function Readit:addToMainMenu(menu_items)
 
             if success then
               UIManager:show(InfoMessage:new {
-                text = _("Sincronización exitosa"),
+                text = _("Synchronization successful"),
               })
             else
               UIManager:show(InfoMessage:new {
-                text = _("Error en la sincronización"),
+                text = _("Synchronization error"),
               })
             end
           else
             UIManager:show(InfoMessage:new {
-              text = _("No hay libro abierto"),
+              text = _("No book open"),
             })
           end
         end,
