@@ -97,10 +97,7 @@ function Readit:showUserCodeDialog()
   input_dialog:onShowKeyboard()
 end
 
-local function postJSON(bodyTable, deviceCode)
-  -- Agregar deviceCode al body
-  bodyTable.deviceCode = deviceCode
-
+local function postJSON(bodyTable)
   local body = json.encode(bodyTable)
   local response = {}
 
@@ -295,6 +292,108 @@ function Readit:init()
   -- Inicializar settings persistentes
   self.settings = LuaSettings:open(self.settings_file)
   self.user_code = self.settings:readSetting("user_code", "")
+
+  -- Registrar acción personalizada en el menú de highlights
+  self:registerHighlightAction()
+end
+
+function Readit:registerHighlightAction()
+  -- Verificar que existe ui.highlight
+  if not self.ui or not self.ui.highlight then
+    return
+  end
+
+  -- Agregar acción personalizada al menú de highlights
+  self.ui.highlight:addToHighlightDialog("readit_send", function(this)
+    return {
+      text = _("Send to Read It"),
+      callback = function()
+        self:sendHighlightToReadIt(this)
+      end,
+    }
+  end)
+end
+
+function Readit:sendHighlightToReadIt(highlight_dialog)
+  if not self.ui.document or not self.ui.document.file then
+    UIManager:show(InfoMessage:new {
+      text = _("No book open"),
+    })
+    return
+  end
+
+  -- Obtener información del highlight
+  local selected_text = highlight_dialog.selected_text
+  if not selected_text or selected_text.text == "" then
+    UIManager:show(InfoMessage:new {
+      text = _("No text selected"),
+    })
+    return
+  end
+
+  local document_hash = util.partialMD5(self.ui.document.file)
+  local deviceCode = self:getUserIdentifier()
+
+
+  -- Obtener el número de página
+  local page = 0
+  if self.ui.document.getPageFromXPointer then
+    page = self.ui.document:getPageFromXPointer(selected_text.pos0) or 0
+  end
+
+  -- Preparar datos del highlight
+  local highlight_data = {
+    book_hash = document_hash,
+    device_code = deviceCode,
+    highlight_text = selected_text.text,
+    page = page,
+    created_at = os.date("!%Y-%m-%dT%H:%M:%SZ"),
+  }
+
+  UIManager:show(InfoMessage:new {
+    text = _("Sending highlight..."),
+    timeout = 1,
+  })
+
+  -- Enviar highlight al servidor
+  local success = self:syncHighlight(highlight_data)
+
+  if success then
+    UIManager:show(InfoMessage:new {
+      text = _("Highlight sent successfully"),
+    })
+  else
+    UIManager:show(InfoMessage:new {
+      text = _("Error sending highlight"),
+    })
+  end
+
+  -- Cerrar el diálogo de highlight
+  UIManager:close(highlight_dialog)
+end
+
+function Readit:syncHighlight(highlight_data)
+  local body = json.encode(highlight_data)
+  local response = {}
+
+  local ok, status = http.request {
+    url = BASE_API_URL .. "/highlights",
+    method = "POST",
+    headers = {
+      ["Content-Type"] = "application/json",
+      ["Content-Length"] = #body,
+    },
+    source = ltn12.source.string(body),
+    sink = ltn12.sink.table(response)
+  }
+
+  if ok and status == 200 then
+    logger.info("Highlight synchronized successfully")
+    return true
+  else
+    logger.err("Error synchronizing highlight:", status)
+    return false
+  end
 end
 
 function Readit:onSaveSettings()
@@ -338,12 +437,13 @@ function Readit:showBookList()
 
         local document_path = self.ui.document.file
         local document_hash = util.partialMD5(document_path)
-        local deviceCode = self:getUserIdentifier()
+
         postJSON({
           googleId = book.googleId,
           hash = document_hash,
-          pageCount = self.ui.document:getPageCount() or 0
-        }, deviceCode)
+          pageCount = self.ui.document:getPageCount() or 0,
+          deviceCode = self:getUserIdentifier()
+        })
       end,
     })
   end
