@@ -292,9 +292,15 @@ function Readit:init()
   -- Inicializar settings persistentes
   self.settings = LuaSettings:open(self.settings_file)
   self.user_code = self.settings:readSetting("user_code", "")
+  self.auto_sync_highlights = self.settings:readSetting("auto_sync_highlights", false)
 
   -- Registrar acción personalizada en el menú de highlights
   self:registerHighlightAction()
+
+  -- Registrar hook para auto-sync si está habilitado
+  if self.auto_sync_highlights then
+    self:registerAutoSyncHook()
+  end
 end
 
 function Readit:registerHighlightAction()
@@ -303,15 +309,43 @@ function Readit:registerHighlightAction()
     return
   end
 
-  -- Agregar acción personalizada al menú de highlights
-  self.ui.highlight:addToHighlightDialog("readit_send", function(this)
-    return {
-      text = _("Send to Read It"),
-      callback = function()
-        self:sendHighlightToReadIt(this)
-      end,
-    }
-  end)
+  -- Solo agregar el botón manual si auto-sync está deshabilitado
+  if not self.auto_sync_highlights then
+    self.ui.highlight:addToHighlightDialog("readit_send", function(this)
+      return {
+        text = _("Send to Read It"),
+        callback = function()
+          self:sendHighlightToReadIt(this)
+        end,
+      }
+    end)
+  end
+end
+
+function Readit:registerAutoSyncHook()
+  -- Verificar que existe ui.highlight
+  if not self.ui or not self.ui.highlight then
+    return
+  end
+
+  -- Guardar referencia al método original saveHighlight
+  local original_saveHighlight = self.ui.highlight.saveHighlight
+
+  -- Sobrescribir el método saveHighlight para interceptar cuando se crea un highlight
+  self.ui.highlight.saveHighlight = function(highlight_self, extend_to_sentence)
+    -- Llamar al método original primero
+    local index = original_saveHighlight(highlight_self, extend_to_sentence)
+
+    -- Si se guardó exitosamente y auto-sync está habilitado, enviar el highlight
+    if index and self.auto_sync_highlights then
+      local item = self.ui.annotation.annotations[index]
+      if item and not item.is_tmp then -- solo enviar highlights permanentes
+        self:sendHighlightData(item)
+      end
+    end
+
+    return index
+  end
 end
 
 function Readit:sendHighlightToReadIt(highlight_dialog)
@@ -333,7 +367,6 @@ function Readit:sendHighlightToReadIt(highlight_dialog)
 
   local document_hash = util.partialMD5(self.ui.document.file)
   local deviceCode = self:getUserIdentifier()
-
 
   -- Obtener el número de página
   local page = 0
@@ -372,6 +405,48 @@ function Readit:sendHighlightToReadIt(highlight_dialog)
   UIManager:close(highlight_dialog)
 end
 
+function Readit:sendHighlightData(highlight)
+  logger.info("sendHighlightData called - auto_sync_highlights:", self.auto_sync_highlights)
+
+  if not self.ui.document or not self.ui.document.file then
+    logger.warn("No document or file open")
+    return
+  end
+
+  local document_hash = util.partialMD5(self.ui.document.file)
+  local deviceCode = self:getUserIdentifier()
+
+  logger.info("Preparing highlight data for book:", document_hash)
+
+  -- Obtener el número de página
+  local page = 0
+  if self.ui.document.getPageFromXPointer and highlight.pos0 then
+    page = self.ui.document:getPageFromXPointer(highlight.pos0) or 0
+  elseif highlight.page then
+    page = highlight.page
+  end
+
+  -- Preparar datos del highlight
+  local highlight_data = {
+    book_hash = document_hash,
+    device_code = deviceCode,
+    highlight_text = highlight.text or "",
+    page = page,
+    created_at = os.date("!%Y-%m-%dT%H:%M:%SZ"),
+  }
+
+  logger.info("Sending highlight to API:", highlight_data.highlight_text)
+
+  -- Enviar highlight al servidor en segundo plano
+  local success = self:syncHighlight(highlight_data)
+
+  if success then
+    logger.info("Highlight sent successfully to API")
+  else
+    logger.err("Failed to send highlight to API")
+  end
+end
+
 function Readit:syncHighlight(highlight_data)
   local body = json.encode(highlight_data)
   local response = {}
@@ -397,6 +472,13 @@ function Readit:syncHighlight(highlight_data)
 end
 
 function Readit:onSaveSettings()
+  -- Guardar settings
+  if self.settings then
+    self.settings:saveSetting("user_code", self.user_code)
+    self.settings:saveSetting("auto_sync_highlights", self.auto_sync_highlights)
+    self.settings:flush()
+  end
+
   -- Se ejecuta periódicamente y antes de suspensión/cierre
   if self.ui and self.ui.document and self.ui.document.file then
     local document_hash = util.partialMD5(self.ui.document.file)
@@ -479,6 +561,31 @@ function Readit:addToMainMenu(menu_items)
         text = _("Configure User Code"),
         callback = function()
           self:showUserCodeDialog()
+        end,
+      },
+      {
+        text = _("Auto sync highlights"),
+        checked_func = function()
+          return self.auto_sync_highlights
+        end,
+        callback = function()
+          self.auto_sync_highlights = not self.auto_sync_highlights
+          self:onSaveSettings()
+
+          -- Mostrar mensaje de confirmación
+          local message = self.auto_sync_highlights
+              and _("Auto sync enabled. Highlights will be sent automatically.")
+              or _("Auto sync disabled. Use 'Send to Read It' button manually.")
+
+          UIManager:show(InfoMessage:new {
+            text = message,
+          })
+
+          -- Recargar el plugin para aplicar cambios
+          UIManager:show(InfoMessage:new {
+            text = _("Please close and reopen the book to apply changes."),
+            timeout = 3,
+          })
         end,
       },
       {
