@@ -20,7 +20,7 @@ local logger = require("logger")
 local SQ3 = require("lua-ljsqlite3/init")
 local random = require("random")
 
-local debugMode = false
+local debugMode = true
 
 local BASE_API_URL = ""
 
@@ -28,6 +28,36 @@ if not debugMode then
   BASE_API_URL = "https://read-it-blush.vercel.app/api/koreader"
 else
   BASE_API_URL = "https://v5jdc5vc-3000.brs.devtunnels.ms/api/koreader"
+end
+
+-- HELPER: Envío asíncrono real (Fire and Forget) usa curl del sistema
+local function sendAsyncJSON(url, bodyTable)
+  local body = json.encode(bodyTable)
+  -- Usar un nombre de archivo único para evitar colisiones
+  local tmp_filename = "readit_payload_" .. os.time() .. "_" .. math.random(1000) .. ".json"
+  local tmp_path = DataStorage:getSettingsDir() .. "/" .. tmp_filename
+
+  -- 1. Escribir el cuerpo en un archivo temporal (rápido)
+  local f = io.open(tmp_path, "w")
+  if f then
+    f:write(body)
+    f:close()
+  else
+    logger.err("ReadIt: No se pudo crear archivo temporal para envío async")
+    return
+  end
+
+  -- 2. Construir comando curl para ejecutar en background
+  -- La sintaxis ( cmd ; rm file ) & ejecuta en segundo plano y limpia el archivo al terminar
+  local cmd = string.format(
+    'curl -X POST -H "Content-Type: application/json" -d "@%s" "%s" --max-time 20 > /dev/null 2>&1; rm "%s" &',
+    tmp_path,
+    url,
+    tmp_path
+  )
+
+  -- 3. Delegar al sistema operativo
+  os.execute(cmd)
 end
 
 
@@ -95,24 +125,6 @@ function Readit:showUserCodeDialog()
   }
   UIManager:show(input_dialog)
   input_dialog:onShowKeyboard()
-end
-
-local function postJSON(bodyTable)
-  local body = json.encode(bodyTable)
-  local response = {}
-
-  local ok, status = http.request {
-    url = BASE_API_URL .. "/hash",
-    method = "POST",
-    headers = {
-      ["Content-Type"] = "application/json",
-      ["Content-Length"] = #body,
-    },
-    source = ltn12.source.string(body),
-    sink = ltn12.sink.table(response)
-  }
-
-  return ok, status, table.concat(response)
 end
 
 local function getBookList(deviceCode)
@@ -252,7 +264,7 @@ local function syncBookStatistics(book_hash, deviceCode)
     return true
   end
 
-  local body = json.encode({
+  local payload = {
     hash = book_hash,
     deviceCode = deviceCode,
     title = stats.title,
@@ -262,27 +274,13 @@ local function syncBookStatistics(book_hash, deviceCode)
     totalReadPages = stats.totalReadPages,
     lastOpen = stats.lastOpen,
     readingSessions = stats.readingSessions
-  })
-
-  local response = {}
-  local ok, status = http.request {
-    url = BASE_API_URL .. "/sync",
-    method = "POST",
-    headers = {
-      ["Content-Type"] = "application/json",
-      ["Content-Length"] = #body,
-    },
-    source = ltn12.source.string(body),
-    sink = ltn12.sink.table(response)
   }
 
-  if ok and status == 200 then
-    logger.info("Statistics synchronized successfully:", #stats.readingSessions, "new sessions")
-    return true
-  else
-    logger.err("Error synchronizing statistics:", status)
-    return false
-  end
+  logger.info("Sending statistics in background via curl...")
+  sendAsyncJSON(BASE_API_URL .. "/sync", payload)
+
+  -- Asumimos éxito (optimistic update) ya que no podemos comprobar el código de estado
+  return true
 end
 
 function Readit:init()
@@ -448,27 +446,12 @@ function Readit:sendHighlightData(highlight)
 end
 
 function Readit:syncHighlight(highlight_data)
-  local body = json.encode(highlight_data)
-  local response = {}
+  -- REEMPLAZO: Usar la versión asíncrona para no congelar la pantalla al subrayar
+  logger.info("Sending highlight via async curl")
+  sendAsyncJSON(BASE_API_URL .. "/highlights", highlight_data)
 
-  local ok, status = http.request {
-    url = BASE_API_URL .. "/highlights",
-    method = "POST",
-    headers = {
-      ["Content-Type"] = "application/json",
-      ["Content-Length"] = #body,
-    },
-    source = ltn12.source.string(body),
-    sink = ltn12.sink.table(response)
-  }
-
-  if ok and status == 200 then
-    logger.info("Highlight synchronized successfully")
-    return true
-  else
-    logger.err("Error synchronizing highlight:", status)
-    return false
-  end
+  -- Retornamos true inmediatamente (Optimistic UI)
+  return true
 end
 
 function Readit:onSaveSettings()
@@ -520,7 +503,8 @@ function Readit:showBookList()
         local document_path = self.ui.document.file
         local document_hash = util.partialMD5(document_path)
 
-        postJSON({
+        logger.info("Linking book via async curl")
+        sendAsyncJSON(BASE_API_URL .. "/hash", {
           googleId = book.googleId,
           hash = document_hash,
           pageCount = self.ui.document:getPageCount() or 0,
